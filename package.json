@@ -1,0 +1,16 @@
+{
+  "name": "telegram-bot",
+  "version": "1.0.0",
+  "description": "Простой Telegram-бот на node-telegram-bot-api, готовый к деплою на Render",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "0.68.0"
+  },
+  "license": "MIT"
+}
