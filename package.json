@@ -1,16 +1,13 @@
 {
-  "name": "telegram-bot",
+  "name": "deevik-bot",
   "version": "1.0.0",
-  "description": "Простой Telegram-бот на node-telegram-bot-api, готовый к деплою на Render",
+  "description": "Telegram AI bot deevik",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
   "dependencies": {
-    "node-telegram-bot-api": "0.67.0"
-  },
-  "license": "MIT"
+    "node-telegram-bot-api": "^0.66.0",
+    "pg": "^8.16.3"
+  }
 }
