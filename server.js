@@ -2,6 +2,7 @@
 // Поддерживает:
 // - 💬 текст
 // - 📷 анализ фотографий
+// - 📝 фото + вопрос
 // - 🤖 история диалога
 // - 👤 профиль
 // - 🆕 новый чат
@@ -49,6 +50,11 @@ const SYSTEM_PROMPT =
   'Отвечай кратко, понятно и по делу. ' +
   'Отвечай на том языке, на котором пишет пользователь.';
 
+
+// =========================
+// SESSIONS
+// =========================
+
 const sessions = new Map();
 
 function getSession(chatId) {
@@ -68,11 +74,21 @@ function addToHistory(session, role, content) {
     content
   });
 
-  if (session.history.length > MAX_HISTORY_MESSAGES) {
+  if (
+    session.history.length >
+    MAX_HISTORY_MESSAGES
+  ) {
     session.history =
-      session.history.slice(-MAX_HISTORY_MESSAGES);
+      session.history.slice(
+        -MAX_HISTORY_MESSAGES
+      );
   }
 }
+
+
+// =========================
+// KEYBOARD
+// =========================
 
 const mainKeyboard = {
   reply_markup: {
@@ -99,6 +115,11 @@ const mainKeyboard = {
   }
 };
 
+
+// =========================
+// TEXTS
+// =========================
+
 const WELCOME_TEXT =
   '👋 Привет! Я AI-ассистент.\n\n' +
   'Можешь писать мне текст или отправлять фотографии 📷\n\n' +
@@ -117,18 +138,27 @@ const HELP_TEXT =
   '/new — новый диалог\n\n' +
   'Просто напиши сообщение или отправь фото.';
 
+
+// =========================
+// PROFILE
+// =========================
+
 function getProfileText(user, session) {
   const id = user.id;
 
-  const username = user.username
-    ? '@' + user.username
-    : 'не указан';
+  const username =
+    user.username
+      ? '@' + user.username
+      : 'не указан';
 
   const firstName =
-    user.first_name || 'не указано';
+    user.first_name ||
+    'не указано';
 
   const messageCount =
-    session ? session.messageCount : 0;
+    session
+      ? session.messageCount
+      : 0;
 
   return (
     '👤 Ваш профиль:\n\n' +
@@ -139,6 +169,11 @@ function getProfileText(user, session) {
   );
 }
 
+
+// =========================
+// WELCOME
+// =========================
+
 async function sendWelcome(chatId) {
   await bot.sendMessage(
     chatId,
@@ -146,6 +181,11 @@ async function sendWelcome(chatId) {
     mainKeyboard
   );
 }
+
+
+// =========================
+// SPLIT TELEGRAM MESSAGE
+// =========================
 
 function splitMessage(
   text,
@@ -156,8 +196,12 @@ function splitMessage(
   let rest = text;
 
   while (rest.length > maxLen) {
-    parts.push(rest.slice(0, maxLen));
-    rest = rest.slice(maxLen);
+    parts.push(
+      rest.slice(0, maxLen)
+    );
+
+    rest =
+      rest.slice(maxLen);
   }
 
   if (rest.length > 0) {
@@ -177,9 +221,10 @@ async function askGroq(history) {
     new AbortController();
 
   const timeoutId =
-    setTimeout(() => {
-      controller.abort();
-    }, REQUEST_TIMEOUT_MS);
+    setTimeout(
+      () => controller.abort(),
+      REQUEST_TIMEOUT_MS
+    );
 
   let response;
 
@@ -205,6 +250,7 @@ async function askGroq(history) {
               role: 'system',
               content: SYSTEM_PROMPT
             },
+
             ...history
           ],
 
@@ -221,28 +267,36 @@ async function askGroq(history) {
         signal: controller.signal
       }
     );
-  } catch (networkErr) {
+  }
+
+  catch (networkErr) {
     if (
       networkErr.name ===
       'AbortError'
     ) {
-      const err = new Error(
-        'Groq не ответил вовремя.'
-      );
+      const err =
+        new Error(
+          'Groq не ответил вовремя.'
+        );
 
-      err.kind = 'timeout';
+      err.kind =
+        'timeout';
 
       throw err;
     }
 
-    const err = new Error(
-      `Groq недоступен: ${networkErr.message}`
-    );
+    const err =
+      new Error(
+        `Groq недоступен: ${networkErr.message}`
+      );
 
-    err.kind = 'network';
+    err.kind =
+      'network';
 
     throw err;
-  } finally {
+  }
+
+  finally {
     clearTimeout(timeoutId);
   }
 
@@ -252,11 +306,14 @@ async function askGroq(history) {
     try {
       bodyText =
         await response.text();
-    } catch (_) {}
+    }
 
-    const err = new Error(
-      `Groq вернул ошибку ${response.status}: ${bodyText}`
-    );
+    catch (_) {}
+
+    const err =
+      new Error(
+        `Groq вернул ошибку ${response.status}: ${bodyText}`
+      );
 
     err.status =
       response.status;
@@ -279,11 +336,13 @@ async function askGroq(history) {
     !content ||
     !content.trim()
   ) {
-    const err = new Error(
-      'Groq вернул пустой ответ.'
-    );
+    const err =
+      new Error(
+        'Groq вернул пустой ответ.'
+      );
 
-    err.kind = 'empty';
+    err.kind =
+      'empty';
 
     throw err;
   }
@@ -305,9 +364,10 @@ async function askGroqWithImage(
     new AbortController();
 
   const timeoutId =
-    setTimeout(() => {
-      controller.abort();
-    }, REQUEST_TIMEOUT_MS);
+    setTimeout(
+      () => controller.abort(),
+      REQUEST_TIMEOUT_MS
+    );
 
   let response;
 
@@ -345,7 +405,7 @@ async function askGroqWithImage(
 
                   text:
                     userText ||
-                    'Что изображено на этом фото?'
+                    'Что изображено на этом фото? Опиши его понятно.'
                 },
 
                 {
@@ -372,28 +432,36 @@ async function askGroqWithImage(
         signal: controller.signal
       }
     );
-  } catch (networkErr) {
+  }
+
+  catch (networkErr) {
     if (
       networkErr.name ===
       'AbortError'
     ) {
-      const err = new Error(
-        'Groq не ответил вовремя.'
-      );
+      const err =
+        new Error(
+          'Groq не ответил вовремя.'
+        );
 
-      err.kind = 'timeout';
+      err.kind =
+        'timeout';
 
       throw err;
     }
 
-    const err = new Error(
-      `Groq недоступен: ${networkErr.message}`
-    );
+    const err =
+      new Error(
+        `Groq недоступен: ${networkErr.message}`
+      );
 
-    err.kind = 'network';
+    err.kind =
+      'network';
 
     throw err;
-  } finally {
+  }
+
+  finally {
     clearTimeout(timeoutId);
   }
 
@@ -403,11 +471,14 @@ async function askGroqWithImage(
     try {
       bodyText =
         await response.text();
-    } catch (_) {}
+    }
 
-    const err = new Error(
-      `Groq вернул ошибку ${response.status}: ${bodyText}`
-    );
+    catch (_) {}
+
+    const err =
+      new Error(
+        `Groq вернул ошибку ${response.status}: ${bodyText}`
+      );
 
     err.status =
       response.status;
@@ -430,11 +501,13 @@ async function askGroqWithImage(
     !content ||
     !content.trim()
   ) {
-    const err = new Error(
-      'Groq вернул пустой ответ.'
-    );
+    const err =
+      new Error(
+        'Groq вернул пустой ответ.'
+      );
 
-    err.kind = 'empty';
+    err.kind =
+      'empty';
 
     throw err;
   }
@@ -444,7 +517,7 @@ async function askGroqWithImage(
 
 
 // =========================
-// ERRORS
+// ERROR TEXT
 // =========================
 
 function getFriendlyErrorText(err) {
@@ -475,21 +548,27 @@ function getFriendlyErrorText(err) {
     );
   }
 
-  if (err.kind === 'timeout') {
+  if (
+    err.kind === 'timeout'
+  ) {
     return (
       '⚠️ AI слишком долго отвечал.\n' +
       'Попробуй ещё раз.'
     );
   }
 
-  if (err.kind === 'network') {
+  if (
+    err.kind === 'network'
+  ) {
     return (
       '⚠️ Не удалось подключиться к Groq.\n' +
       'Попробуй ещё раз.'
     );
   }
 
-  if (err.kind === 'empty') {
+  if (
+    err.kind === 'empty'
+  ) {
     return (
       '⚠️ AI вернул пустой ответ.'
     );
@@ -503,7 +582,256 @@ function getFriendlyErrorText(err) {
 
 
 // =========================
-// TEXT MESSAGES
+// HANDLE TEXT AI MESSAGE
+// =========================
+
+async function handleAiMessage(
+  chatId,
+  text,
+  session
+) {
+  let thinkingMsg = null;
+
+  try {
+    thinkingMsg =
+      await bot.sendMessage(
+        chatId,
+        '⏳ Думаю...'
+      );
+  }
+
+  catch (err) {
+    console.error(
+      '❌ Telegram error:',
+      err.message
+    );
+
+    return;
+  }
+
+  try {
+    addToHistory(
+      session,
+      'user',
+      text
+    );
+
+    const reply =
+      await askGroq(
+        session.history
+      );
+
+    addToHistory(
+      session,
+      'assistant',
+      reply
+    );
+
+    const chunks =
+      splitMessage(reply);
+
+    await bot.editMessageText(
+      chunks[0],
+      {
+        chat_id:
+          chatId,
+
+        message_id:
+          thinkingMsg.message_id
+      }
+    );
+
+    for (
+      let i = 1;
+      i < chunks.length;
+      i++
+    ) {
+      await bot.sendMessage(
+        chatId,
+        chunks[i]
+      );
+    }
+  }
+
+  catch (err) {
+    console.error(
+      '❌ AI error:',
+      err.message
+    );
+
+    const friendlyText =
+      getFriendlyErrorText(err);
+
+    try {
+      await bot.editMessageText(
+        friendlyText,
+        {
+          chat_id:
+            chatId,
+
+          message_id:
+            thinkingMsg.message_id
+        }
+      );
+    }
+
+    catch (editErr) {
+      console.error(
+        '❌ Telegram error:',
+        editErr.message
+      );
+    }
+  }
+}
+
+
+// =========================
+// HANDLE PHOTO
+// =========================
+
+async function handlePhotoMessage(
+  chatId,
+  msg,
+  session
+) {
+  let thinkingMsg = null;
+
+  try {
+    thinkingMsg =
+      await bot.sendMessage(
+        chatId,
+        '👀 Смотрю фото...'
+      );
+
+    const photos =
+      msg.photo;
+
+    if (
+      !photos ||
+      !photos.length
+    ) {
+      throw new Error(
+        'Фото не найдено.'
+      );
+    }
+
+    // Берём самое большое доступное фото
+    const photo =
+      photos[
+        photos.length - 1
+      ];
+
+    // Получаем информацию о файле
+    const file =
+      await bot.getFile(
+        photo.file_id
+      );
+
+    if (
+      !file ||
+      !file.file_path
+    ) {
+      throw new Error(
+        'Не удалось получить фотографию.'
+      );
+    }
+
+    // Telegram URL фотографии
+    const imageUrl =
+      `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+
+    // Если пользователь написал текст
+    // вместе с фото — используем его
+    const userText =
+      msg.caption &&
+      msg.caption.trim()
+        ? msg.caption.trim()
+        : 'Что изображено на этом фото? Опиши его понятно.';
+
+    // Отправляем фото + вопрос в Groq
+    const reply =
+      await askGroqWithImage(
+        session.history,
+        imageUrl,
+        userText
+      );
+
+    // Запоминаем фото-вопрос
+    addToHistory(
+      session,
+      'user',
+      `[Фото] ${userText}`
+    );
+
+    // Запоминаем ответ
+    addToHistory(
+      session,
+      'assistant',
+      reply
+    );
+
+    const chunks =
+      splitMessage(reply);
+
+    await bot.editMessageText(
+      chunks[0],
+      {
+        chat_id:
+          chatId,
+
+        message_id:
+          thinkingMsg.message_id
+      }
+    );
+
+    for (
+      let i = 1;
+      i < chunks.length;
+      i++
+    ) {
+      await bot.sendMessage(
+        chatId,
+        chunks[i]
+      );
+    }
+  }
+
+  catch (err) {
+    console.error(
+      '❌ Photo error:',
+      err.message
+    );
+
+    const errorText =
+      getFriendlyErrorText(err);
+
+    if (thinkingMsg) {
+      try {
+        await bot.editMessageText(
+          errorText,
+          {
+            chat_id:
+              chatId,
+
+            message_id:
+              thinkingMsg.message_id
+          }
+        );
+      }
+
+      catch (editErr) {
+        console.error(
+          '❌ Telegram error:',
+          editErr.message
+        );
+      }
+    }
+  }
+}
+
+
+// =========================
+// ALL TELEGRAM MESSAGES
 // =========================
 
 bot.on(
@@ -512,35 +840,73 @@ bot.on(
     const chatId =
       msg.chat.id;
 
-    const text =
-      msg.text;
-
-    // Фотографии обрабатываются
-    // отдельным обработчиком ниже
-    if (!text) {
-      return;
-    }
-
     const session =
       getSession(chatId);
 
     session.messageCount++;
 
     try {
-      if (text === '/start') {
+
+      // =====================
+      // PHOTO
+      // =====================
+
+      if (
+        msg.photo &&
+        msg.photo.length > 0
+      ) {
+        await handlePhotoMessage(
+          chatId,
+          msg,
+          session
+        );
+
+        return;
+      }
+
+
+      // =====================
+      // TEXT
+      // =====================
+
+      const text =
+        msg.text;
+
+      if (!text) {
+        return;
+      }
+
+
+      // =====================
+      // COMMANDS
+      // =====================
+
+      if (
+        text === '/start'
+      ) {
         await sendWelcome(
           chatId
         );
+
+        return;
       }
 
-      else if (text === '/help') {
+
+      if (
+        text === '/help'
+      ) {
         await bot.sendMessage(
           chatId,
           HELP_TEXT
         );
+
+        return;
       }
 
-      else if (text === '/profile') {
+
+      if (
+        text === '/profile'
+      ) {
         await bot.sendMessage(
           chatId,
           getProfileText(
@@ -548,18 +914,26 @@ bot.on(
             session
           )
         );
+
+        return;
       }
 
-      else if (text === '/new') {
+
+      if (
+        text === '/new'
+      ) {
         session.history = [];
 
         await bot.sendMessage(
           chatId,
           '🆕 Новый диалог начат!'
         );
+
+        return;
       }
 
-      else if (
+
+      if (
         text.startsWith('/')
       ) {
         await bot.sendMessage(
@@ -567,158 +941,28 @@ bot.on(
           '❓ Я не знаю такую команду.\n\n' +
           HELP_TEXT
         );
+
+        return;
       }
 
-      else {
-        await handleAiMessage(
-          chatId,
-          text,
-          session
-        );
-      }
 
-    } catch (err) {
+      // =====================
+      // AI
+      // =====================
+
+      await handleAiMessage(
+        chatId,
+        text,
+        session
+      );
+
+    }
+
+    catch (err) {
       console.error(
         '❌ Bot error:',
         err.message
       );
-    }
-  }
-);
-
-
-// =========================
-// PHOTO MESSAGES
-// =========================
-
-bot.on(
-  'photo',
-  async (msg) => {
-    const chatId =
-      msg.chat.id;
-
-    const session =
-      getSession(chatId);
-
-    session.messageCount++;
-
-    let thinkingMsg = null;
-
-    try {
-      thinkingMsg =
-        await bot.sendMessage(
-          chatId,
-          '👀 Смотрю фото...'
-        );
-
-      const photos =
-        msg.photo;
-
-      if (
-        !photos ||
-        !photos.length
-      ) {
-        throw new Error(
-          'Фото не найдено.'
-        );
-      }
-
-      // Берём самое большое
-      // доступное качество
-      const photo =
-        photos[photos.length - 1];
-
-      // Получаем файл Telegram
-      const file =
-        await bot.getFile(
-          photo.file_id
-        );
-
-      if (!file.file_path) {
-        throw new Error(
-          'Не удалось получить фотографию.'
-        );
-      }
-
-      // Ссылка на файл Telegram
-      const imageUrl =
-        `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-
-      const userText =
-        msg.caption &&
-        msg.caption.trim()
-          ? msg.caption.trim()
-          : 'Что изображено на этом фото? Опиши его понятно.';
-
-      const reply =
-        await askGroqWithImage(
-          session.history,
-          imageUrl,
-          userText
-        );
-
-      // Запоминаем вопрос и ответ
-      addToHistory(
-        session,
-        'user',
-        `[Фото] ${userText}`
-      );
-
-      addToHistory(
-        session,
-        'assistant',
-        reply
-      );
-
-      const chunks =
-        splitMessage(reply);
-
-      await bot.editMessageText(
-        chunks[0],
-        {
-          chat_id: chatId,
-          message_id:
-            thinkingMsg.message_id
-        }
-      );
-
-      for (
-        let i = 1;
-        i < chunks.length;
-        i++
-      ) {
-        await bot.sendMessage(
-          chatId,
-          chunks[i]
-        );
-      }
-
-    } catch (err) {
-      console.error(
-        '❌ Photo error:',
-        err.message
-      );
-
-      const errorText =
-        getFriendlyErrorText(err);
-
-      if (thinkingMsg) {
-        try {
-          await bot.editMessageText(
-            errorText,
-            {
-              chat_id: chatId,
-              message_id:
-                thinkingMsg.message_id
-            }
-          );
-        } catch (editErr) {
-          console.error(
-            '❌ Telegram error:',
-            editErr.message
-          );
-        }
-      }
     }
   }
 );
@@ -741,6 +985,7 @@ bot.on(
       getSession(chatId);
 
     try {
+
       if (
         data === 'action_new'
       ) {
@@ -752,6 +997,7 @@ bot.on(
         );
       }
 
+
       else if (
         data === 'action_help'
       ) {
@@ -760,6 +1006,7 @@ bot.on(
           HELP_TEXT
         );
       }
+
 
       else if (
         data === 'action_profile'
@@ -773,11 +1020,14 @@ bot.on(
         );
       }
 
+
       await bot.answerCallbackQuery(
         query.id
       );
 
-    } catch (err) {
+    }
+
+    catch (err) {
       console.error(
         '❌ Callback error:',
         err.message
@@ -787,14 +1037,16 @@ bot.on(
         await bot.answerCallbackQuery(
           query.id
         );
-      } catch (_) {}
+      }
+
+      catch (_) {}
     }
   }
 );
 
 
 // =========================
-// TELEGRAM ERRORS
+// TELEGRAM POLLING ERRORS
 // =========================
 
 bot.on(
@@ -889,6 +1141,7 @@ bot.getMe()
       `✅ Bot is running (@${me.username})`
     );
   })
+
   .catch((err) => {
     console.error(
       '❌ Не удалось подключиться к Telegram:',
