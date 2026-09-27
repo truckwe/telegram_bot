@@ -1,43 +1,162 @@
-// Telegram AI-бот на Groq
-// Поддерживает:
-// - 💬 текст
-// - 📷 анализ фотографий
-// - 📝 фото + вопрос
-// - 🤖 история диалога
-// - 👤 профиль
-// - 🆕 новый чат
-//
-// Render Environment Variables:
-// BOT_TOKEN
-// GROQ_API_KEY
+const http = require("http");
+const TelegramBot = require("node-telegram-bot-api");
+const { Pool } = require("pg");
 
-const http = require('http');
-const TelegramBot = require('node-telegram-bot-api');
+// =========================
+// ENV
+// =========================
 
 const token = process.env.BOT_TOKEN;
 const groqApiKey = process.env.GROQ_API_KEY;
+const databaseUrl = process.env.NEON_DATABASE_URL;
 
 if (!token) {
-  console.error('❌ Не установлена переменная BOT_TOKEN');
-  process.exit(1);
+    console.error("❌ BOT_TOKEN не найден");
+    process.exit(1);
 }
 
 if (!groqApiKey) {
-  console.error('❌ Не установлена переменная GROQ_API_KEY');
-  process.exit(1);
+    console.error("❌ GROQ_API_KEY не найден");
+    process.exit(1);
 }
 
-console.log('🤖 Bot starting...');
+if (!databaseUrl) {
+    console.error("❌ NEON_DATABASE_URL не найден");
+    process.exit(1);
+}
 
-const bot = new TelegramBot(token, {
-  polling: true
+// =========================
+// DATABASE
+// =========================
+
+const pool = new Pool({
+    connectionString: databaseUrl,
+    ssl: {
+        rejectUnauthorized: false
+    }
 });
 
-const GROQ_URL =
-  'https://api.groq.com/openai/v1/chat/completions';
+async function initDatabase() {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id TEXT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            credits INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
 
-const GROQ_MODEL =
-  'qwen/qwen3.8-27b';
+    console.log("✅ Neon database connected");
+    console.log("✅ Users table ready");
+}
+
+// =========================
+// USERS
+// =========================
+
+async function ensureUser(user) {
+    const telegramId = String(user.id);
+
+    await pool.query(
+        `
+        INSERT INTO users (
+            telegram_id,
+            username,
+            first_name
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (telegram_id)
+        DO UPDATE SET
+            username = EXCLUDED.username,
+            first_name = EXCLUDED.first_name,
+            updated_at = NOW()
+        `,
+        [
+            telegramId,
+            user.username || null,
+            user.first_name || null
+        ]
+    );
+}
+
+async function getUser(telegramId) {
+    const result = await pool.query(
+        `
+        SELECT *
+        FROM users
+        WHERE telegram_id = $1
+        `,
+        [String(telegramId)]
+    );
+
+    return result.rows[0] || null;
+}
+
+async function getCredits(telegramId) {
+    const user = await getUser(telegramId);
+
+    if (!user) {
+        return 0;
+    }
+
+    return user.credits;
+}
+
+async function addCredits(telegramId, amount) {
+    await pool.query(
+        `
+        UPDATE users
+        SET
+            credits = credits + $1,
+            updated_at = NOW()
+        WHERE telegram_id = $2
+        `,
+        [
+            amount,
+            String(telegramId)
+        ]
+    );
+}
+
+async function spendCredits(telegramId, amount) {
+    const result = await pool.query(
+        `
+        UPDATE users
+        SET
+            credits = credits - $1,
+            updated_at = NOW()
+        WHERE telegram_id = $2
+          AND credits >= $1
+        RETURNING credits
+        `,
+        [
+            amount,
+            String(telegramId)
+        ]
+    );
+
+    if (result.rows.length === 0) {
+        return false;
+    }
+
+    return true;
+}
+
+// =========================
+// TELEGRAM BOT
+// =========================
+
+const bot = new TelegramBot(token, {
+    polling: true
+});
+
+// =========================
+// SETTINGS
+// =========================
+
+const GROQ_MODEL = "qwen/qwen3.8-27b";
 
 const MAX_OUTPUT_TOKENS = 600;
 const TEMPERATURE = 0.7;
@@ -45,11 +164,8 @@ const REQUEST_TIMEOUT_MS = 20000;
 const MAX_HISTORY_MESSAGES = 6;
 const TELEGRAM_MESSAGE_LIMIT = 4000;
 
-const SYSTEM_PROMPT =
-  'Ты — дружелюбный AI-ассистент внутри Telegram-бота. ' +
-  'Отвечай кратко, понятно и по делу. ' +
-  'Отвечай на том языке, на котором пишет пользователь.';
-
+// Стоимость одной будущей генерации фото
+const PHOTO_GENERATION_COST = 10;
 
 // =========================
 // SESSIONS
@@ -58,1095 +174,717 @@ const SYSTEM_PROMPT =
 const sessions = new Map();
 
 function getSession(chatId) {
-  if (!sessions.has(chatId)) {
-    sessions.set(chatId, {
-      history: [],
-      messageCount: 0
+    const id = String(chatId);
+
+    if (!sessions.has(id)) {
+        sessions.set(id, {
+            history: [],
+            messageCount: 0
+        });
+    }
+
+    return sessions.get(id);
+}
+
+function resetSession(chatId) {
+    sessions.set(String(chatId), {
+        history: [],
+        messageCount: 0
     });
-  }
-
-  return sessions.get(chatId);
 }
-
-function addToHistory(session, role, content) {
-  session.history.push({
-    role,
-    content
-  });
-
-  if (
-    session.history.length >
-    MAX_HISTORY_MESSAGES
-  ) {
-    session.history =
-      session.history.slice(
-        -MAX_HISTORY_MESSAGES
-      );
-  }
-}
-
 
 // =========================
 // KEYBOARD
 // =========================
 
-const mainKeyboard = {
-  reply_markup: {
-    inline_keyboard: [
-      [
-        {
-          text: '🤖 Новый чат',
-          callback_data: 'action_new'
+function getMainKeyboard() {
+    return {
+        reply_markup: {
+            keyboard: [
+                [
+                    {
+                        text: "💬 Чат"
+                    },
+                    {
+                        text: "🎨 Генератор фото"
+                    }
+                ],
+                [
+                    {
+                        text: "👤 Профиль"
+                    },
+                    {
+                        text: "ℹ️ Помощь"
+                    }
+                ]
+            ],
+            resize_keyboard: true
         }
-      ],
-      [
-        {
-          text: '👤 Профиль',
-          callback_data: 'action_profile'
-        }
-      ],
-      [
-        {
-          text: 'ℹ️ Помощь',
-          callback_data: 'action_help'
-        }
-      ]
-    ]
-  }
-};
-
-
-// =========================
-// TEXTS
-// =========================
-
-const WELCOME_TEXT =
-  '👋 Привет! Я AI-ассистент.\n\n' +
-  'Можешь писать мне текст или отправлять фотографии 📷\n\n' +
-  'Я могу отвечать на вопросы и анализировать изображения.\n\n' +
-  'Используй кнопки ниже 👇';
-
-const HELP_TEXT =
-  'ℹ️ Что я умею:\n\n' +
-  '🤖 Отвечаю на вопросы с помощью AI.\n' +
-  '📷 Анализирую фотографии.\n' +
-  '💬 Помню последние сообщения разговора.\n\n' +
-  'Команды:\n' +
-  '/start — главное меню\n' +
-  '/help — помощь\n' +
-  '/profile — профиль\n' +
-  '/new — новый диалог\n\n' +
-  'Просто напиши сообщение или отправь фото.';
-
-
-// =========================
-// PROFILE
-// =========================
-
-function getProfileText(user, session) {
-  const id = user.id;
-
-  const username =
-    user.username
-      ? '@' + user.username
-      : 'не указан';
-
-  const firstName =
-    user.first_name ||
-    'не указано';
-
-  const messageCount =
-    session
-      ? session.messageCount
-      : 0;
-
-  return (
-    '👤 Ваш профиль:\n\n' +
-    `🆔 Telegram ID: ${id}\n` +
-    `📛 Имя: ${firstName}\n` +
-    `🔗 Username: ${username}\n` +
-    `💬 Сообщений отправлено: ${messageCount}`
-  );
+    };
 }
 
-
 // =========================
-// WELCOME
+// GROQ
 // =========================
 
-async function sendWelcome(chatId) {
-  await bot.sendMessage(
-    chatId,
-    WELCOME_TEXT,
-    mainKeyboard
-  );
+async function groqRequest(messages) {
+    const controller = new AbortController();
+
+    const timeout = setTimeout(() => {
+        controller.abort();
+    }, REQUEST_TIMEOUT_MS);
+
+    try {
+        const response = await fetch(
+            "https://api.groq.com/openai/v1/chat/completions",
+            {
+                method: "POST",
+
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${groqApiKey}`
+                },
+
+                body: JSON.stringify({
+                    model: GROQ_MODEL,
+                    messages,
+                    temperature: TEMPERATURE,
+                    max_tokens: MAX_OUTPUT_TOKENS
+                }),
+
+                signal: controller.signal
+            }
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            console.error("Groq error:", data);
+
+            throw new Error(
+                data?.error?.message ||
+                "Ошибка Groq API"
+            );
+        }
+
+        return data?.choices?.[0]?.message?.content || "";
+    } finally {
+        clearTimeout(timeout);
+    }
 }
-
-
-// =========================
-// SPLIT TELEGRAM MESSAGE
-// =========================
-
-function splitMessage(
-  text,
-  maxLen = TELEGRAM_MESSAGE_LIMIT
-) {
-  const parts = [];
-
-  let rest = text;
-
-  while (rest.length > maxLen) {
-    parts.push(
-      rest.slice(0, maxLen)
-    );
-
-    rest =
-      rest.slice(maxLen);
-  }
-
-  if (rest.length > 0) {
-    parts.push(rest);
-  }
-
-  return parts;
-}
-
 
 // =========================
 // TEXT AI
 // =========================
 
 async function askGroq(history) {
-  const controller =
-    new AbortController();
-
-  const timeoutId =
-    setTimeout(
-      () => controller.abort(),
-      REQUEST_TIMEOUT_MS
-    );
-
-  let response;
-
-  try {
-    response = await fetch(
-      GROQ_URL,
-      {
-        method: 'POST',
-
-        headers: {
-          Authorization:
-            `Bearer ${groqApiKey}`,
-
-          'Content-Type':
-            'application/json'
+    const messages = [
+        {
+            role: "system",
+            content:
+                "Ты дружелюбный AI-помощник deevik. " +
+                "Отвечай понятно, полезно и по существу. " +
+                "Отвечай на языке пользователя. " +
+                "Не делай ответы unnecessarily длинными."
         },
+        ...history
+    ];
 
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-
-          messages: [
-            {
-              role: 'system',
-              content: SYSTEM_PROMPT
-            },
-
-            ...history
-          ],
-
-          max_tokens:
-            MAX_OUTPUT_TOKENS,
-
-          temperature:
-            TEMPERATURE,
-
-          reasoning_effort:
-            'none'
-        }),
-
-        signal: controller.signal
-      }
-    );
-  }
-
-  catch (networkErr) {
-    if (
-      networkErr.name ===
-      'AbortError'
-    ) {
-      const err =
-        new Error(
-          'Groq не ответил вовремя.'
-        );
-
-      err.kind =
-        'timeout';
-
-      throw err;
-    }
-
-    const err =
-      new Error(
-        `Groq недоступен: ${networkErr.message}`
-      );
-
-    err.kind =
-      'network';
-
-    throw err;
-  }
-
-  finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!response.ok) {
-    let bodyText = '';
-
-    try {
-      bodyText =
-        await response.text();
-    }
-
-    catch (_) {}
-
-    const err =
-      new Error(
-        `Groq вернул ошибку ${response.status}: ${bodyText}`
-      );
-
-    err.status =
-      response.status;
-
-    throw err;
-  }
-
-  const data =
-    await response.json();
-
-  const content =
-    data &&
-    data.choices &&
-    data.choices[0] &&
-    data.choices[0].message
-      ? data.choices[0].message.content
-      : null;
-
-  if (
-    !content ||
-    !content.trim()
-  ) {
-    const err =
-      new Error(
-        'Groq вернул пустой ответ.'
-      );
-
-    err.kind =
-      'empty';
-
-    throw err;
-  }
-
-  return content.trim();
+    return await groqRequest(messages);
 }
-
 
 // =========================
 // IMAGE AI
 // =========================
 
 async function askGroqWithImage(
-  history,
-  imageUrl,
-  userText
+    history,
+    imageUrl,
+    userText
 ) {
-  const controller =
-    new AbortController();
-
-  const timeoutId =
-    setTimeout(
-      () => controller.abort(),
-      REQUEST_TIMEOUT_MS
-    );
-
-  let response;
-
-  try {
-    response = await fetch(
-      GROQ_URL,
-      {
-        method: 'POST',
-
-        headers: {
-          Authorization:
-            `Bearer ${groqApiKey}`,
-
-          'Content-Type':
-            'application/json'
+    const messages = [
+        {
+            role: "system",
+            content:
+                "Ты дружелюбный AI-помощник deevik. " +
+                "Ты умеешь анализировать изображения. " +
+                "Отвечай понятно, точно и на языке пользователя."
         },
+        ...history,
 
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-
-          messages: [
-            {
-              role: 'system',
-              content: SYSTEM_PROMPT
-            },
-
-            ...history,
-
-            {
-              role: 'user',
-
-              content: [
+        {
+            role: "user",
+            content: [
                 {
-                  type: 'text',
-
-                  text:
-                    userText ||
-                    'Что изображено на этом фото? Опиши его понятно.'
+                    type: "text",
+                    text: userText
                 },
-
                 {
-                  type: 'image_url',
-
-                  image_url: {
-                    url: imageUrl
-                  }
+                    type: "image_url",
+                    image_url: {
+                        url: imageUrl
+                    }
                 }
-              ]
-            }
-          ],
+            ]
+        }
+    ];
 
-          max_tokens:
-            MAX_OUTPUT_TOKENS,
-
-          temperature:
-            TEMPERATURE,
-
-          reasoning_effort:
-            'none'
-        }),
-
-        signal: controller.signal
-      }
-    );
-  }
-
-  catch (networkErr) {
-    if (
-      networkErr.name ===
-      'AbortError'
-    ) {
-      const err =
-        new Error(
-          'Groq не ответил вовремя.'
-        );
-
-      err.kind =
-        'timeout';
-
-      throw err;
-    }
-
-    const err =
-      new Error(
-        `Groq недоступен: ${networkErr.message}`
-      );
-
-    err.kind =
-      'network';
-
-    throw err;
-  }
-
-  finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!response.ok) {
-    let bodyText = '';
-
-    try {
-      bodyText =
-        await response.text();
-    }
-
-    catch (_) {}
-
-    const err =
-      new Error(
-        `Groq вернул ошибку ${response.status}: ${bodyText}`
-      );
-
-    err.status =
-      response.status;
-
-    throw err;
-  }
-
-  const data =
-    await response.json();
-
-  const content =
-    data &&
-    data.choices &&
-    data.choices[0] &&
-    data.choices[0].message
-      ? data.choices[0].message.content
-      : null;
-
-  if (
-    !content ||
-    !content.trim()
-  ) {
-    const err =
-      new Error(
-        'Groq вернул пустой ответ.'
-      );
-
-    err.kind =
-      'empty';
-
-    throw err;
-  }
-
-  return content.trim();
+    return await groqRequest(messages);
 }
-
 
 // =========================
 // ERROR TEXT
 // =========================
 
-function getFriendlyErrorText(err) {
-  if (
-    err.status === 401 ||
-    err.status === 403
-  ) {
-    return (
-      '⚠️ Проблема с ключом Groq.\n' +
-      'Проверь GROQ_API_KEY в Render.'
-    );
-  }
+function getFriendlyErrorText(error) {
+    if (!error) {
+        return "❌ Произошла неизвестная ошибка.";
+    }
 
-  if (err.status === 429) {
-    return (
-      '⚠️ Достигнут лимит Groq.\n' +
-      'Попробуй немного позже.'
-    );
-  }
+    if (error.name === "AbortError") {
+        return "⏱️ AI отвечает слишком долго. Попробуй ещё раз.";
+    }
 
-  if (
-    err.status &&
-    err.status >= 500
-  ) {
-    return (
-      '⚠️ Сервис Groq сейчас недоступен.\n' +
-      'Попробуй позже.'
-    );
-  }
+    const message = String(error.message || "");
 
-  if (
-    err.kind === 'timeout'
-  ) {
-    return (
-      '⚠️ AI слишком долго отвечал.\n' +
-      'Попробуй ещё раз.'
-    );
-  }
+    if (
+        message.toLowerCase().includes("rate limit")
+    ) {
+        return "⏳ Слишком много запросов. Попробуй немного позже.";
+    }
 
-  if (
-    err.kind === 'network'
-  ) {
-    return (
-      '⚠️ Не удалось подключиться к Groq.\n' +
-      'Попробуй ещё раз.'
-    );
-  }
+    if (
+        message.toLowerCase().includes("api key")
+    ) {
+        return "❌ Ошибка API-ключа Groq.";
+    }
 
-  if (
-    err.kind === 'empty'
-  ) {
-    return (
-      '⚠️ AI вернул пустой ответ.'
-    );
-  }
-
-  return (
-    '⚠️ Что-то пошло не так.\n' +
-    'Попробуй ещё раз.'
-  );
+    return "❌ Не удалось получить ответ от AI. Попробуй ещё раз.";
 }
 
+// =========================
+// SEND LONG MESSAGE
+// =========================
+
+async function sendLongMessage(chatId, text) {
+    if (!text) {
+        text = "Пустой ответ от AI.";
+    }
+
+    while (text.length > 0) {
+        const part = text.slice(
+            0,
+            TELEGRAM_MESSAGE_LIMIT
+        );
+
+        text = text.slice(
+            TELEGRAM_MESSAGE_LIMIT
+        );
+
+        await bot.sendMessage(
+            chatId,
+            part
+        );
+    }
+}
 
 // =========================
-// HANDLE TEXT AI MESSAGE
+// TEXT MESSAGE
 // =========================
 
 async function handleAiMessage(
-  chatId,
-  text,
-  session
+    chatId,
+    text,
+    session
 ) {
-  let thinkingMsg = null;
-
-  try {
-    thinkingMsg =
-      await bot.sendMessage(
-        chatId,
-        '⏳ Думаю...'
-      );
-  }
-
-  catch (err) {
-    console.error(
-      '❌ Telegram error:',
-      err.message
-    );
-
-    return;
-  }
-
-  try {
-    addToHistory(
-      session,
-      'user',
-      text
-    );
-
-    const reply =
-      await askGroq(
-        session.history
-      );
-
-    addToHistory(
-      session,
-      'assistant',
-      reply
-    );
-
-    const chunks =
-      splitMessage(reply);
-
-    await bot.editMessageText(
-      chunks[0],
-      {
-        chat_id:
-          chatId,
-
-        message_id:
-          thinkingMsg.message_id
-      }
-    );
-
-    for (
-      let i = 1;
-      i < chunks.length;
-      i++
-    ) {
-      await bot.sendMessage(
-        chatId,
-        chunks[i]
-      );
-    }
-  }
-
-  catch (err) {
-    console.error(
-      '❌ AI error:',
-      err.message
-    );
-
-    const friendlyText =
-      getFriendlyErrorText(err);
-
-    try {
-      await bot.editMessageText(
-        friendlyText,
-        {
-          chat_id:
-            chatId,
-
-          message_id:
-            thinkingMsg.message_id
-        }
-      );
-    }
-
-    catch (editErr) {
-      console.error(
-        '❌ Telegram error:',
-        editErr.message
-      );
-    }
-  }
-}
-
-
-// =========================
-// HANDLE PHOTO
-// =========================
-
-async function handlePhotoMessage(
-  chatId,
-  msg,
-  session
-) {
-  let thinkingMsg = null;
-
-  try {
-    thinkingMsg =
-      await bot.sendMessage(
-        chatId,
-        '👀 Смотрю фото...'
-      );
-
-    const photos =
-      msg.photo;
-
-    if (
-      !photos ||
-      !photos.length
-    ) {
-      throw new Error(
-        'Фото не найдено.'
-      );
-    }
-
-    // Берём самое большое доступное фото
-    const photo =
-      photos[
-        photos.length - 1
-      ];
-
-    // Получаем информацию о файле
-    const file =
-      await bot.getFile(
-        photo.file_id
-      );
-
-    if (
-      !file ||
-      !file.file_path
-    ) {
-      throw new Error(
-        'Не удалось получить фотографию.'
-      );
-    }
-
-    // Telegram URL фотографии
-    const imageUrl =
-      `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-
-    // Если пользователь написал текст
-    // вместе с фото — используем его
-    const userText =
-      msg.caption &&
-      msg.caption.trim()
-        ? msg.caption.trim()
-        : 'Что изображено на этом фото? Опиши его понятно.';
-
-    // Отправляем фото + вопрос в Groq
-    const reply =
-      await askGroqWithImage(
-        session.history,
-        imageUrl,
-        userText
-      );
-
-    // Запоминаем фото-вопрос
-    addToHistory(
-      session,
-      'user',
-      `[Фото] ${userText}`
-    );
-
-    // Запоминаем ответ
-    addToHistory(
-      session,
-      'assistant',
-      reply
-    );
-
-    const chunks =
-      splitMessage(reply);
-
-    await bot.editMessageText(
-      chunks[0],
-      {
-        chat_id:
-          chatId,
-
-        message_id:
-          thinkingMsg.message_id
-      }
-    );
-
-    for (
-      let i = 1;
-      i < chunks.length;
-      i++
-    ) {
-      await bot.sendMessage(
-        chatId,
-        chunks[i]
-      );
-    }
-  }
-
-  catch (err) {
-    console.error(
-      '❌ Photo error:',
-      err.message
-    );
-
-    const errorText =
-      getFriendlyErrorText(err);
-
-    if (thinkingMsg) {
-      try {
-        await bot.editMessageText(
-          errorText,
-          {
-            chat_id:
-              chatId,
-
-            message_id:
-              thinkingMsg.message_id
-          }
-        );
-      }
-
-      catch (editErr) {
-        console.error(
-          '❌ Telegram error:',
-          editErr.message
-        );
-      }
-    }
-  }
-}
-
-
-// =========================
-// ALL TELEGRAM MESSAGES
-// =========================
-
-bot.on(
-  'message',
-  async (msg) => {
-    const chatId =
-      msg.chat.id;
-
-    const session =
-      getSession(chatId);
+    session.history.push({
+        role: "user",
+        content: text
+    });
 
     session.messageCount++;
 
+    if (
+        session.history.length >
+        MAX_HISTORY_MESSAGES
+    ) {
+        session.history =
+            session.history.slice(
+                -MAX_HISTORY_MESSAGES
+            );
+    }
+
     try {
-
-      // =====================
-      // PHOTO
-      // =====================
-
-      if (
-        msg.photo &&
-        msg.photo.length > 0
-      ) {
-        await handlePhotoMessage(
-          chatId,
-          msg,
-          session
+        await bot.sendChatAction(
+            chatId,
+            "typing"
         );
 
-        return;
-      }
+        const answer =
+            await askGroq(
+                session.history
+            );
 
+        session.history.push({
+            role: "assistant",
+            content: answer
+        });
 
-      // =====================
-      // TEXT
-      // =====================
+        if (
+            session.history.length >
+            MAX_HISTORY_MESSAGES
+        ) {
+            session.history =
+                session.history.slice(
+                    -MAX_HISTORY_MESSAGES
+                );
+        }
 
-      const text =
-        msg.text;
-
-      if (!text) {
-        return;
-      }
-
-
-      // =====================
-      // COMMANDS
-      // =====================
-
-      if (
-        text === '/start'
-      ) {
-        await sendWelcome(
-          chatId
+        await sendLongMessage(
+            chatId,
+            answer
         );
 
-        return;
-      }
-
-
-      if (
-        text === '/help'
-      ) {
-        await bot.sendMessage(
-          chatId,
-          HELP_TEXT
-        );
-
-        return;
-      }
-
-
-      if (
-        text === '/profile'
-      ) {
-        await bot.sendMessage(
-          chatId,
-          getProfileText(
-            msg.from,
-            session
-          )
-        );
-
-        return;
-      }
-
-
-      if (
-        text === '/new'
-      ) {
-        session.history = [];
+    } catch (error) {
+        console.error(error);
 
         await bot.sendMessage(
-          chatId,
-          '🆕 Новый диалог начат!'
+            chatId,
+            getFriendlyErrorText(error)
         );
-
-        return;
-      }
-
-
-      if (
-        text.startsWith('/')
-      ) {
-        await bot.sendMessage(
-          chatId,
-          '❓ Я не знаю такую команду.\n\n' +
-          HELP_TEXT
-        );
-
-        return;
-      }
-
-
-      // =====================
-      // AI
-      // =====================
-
-      await handleAiMessage(
-        chatId,
-        text,
-        session
-      );
-
     }
-
-    catch (err) {
-      console.error(
-        '❌ Bot error:',
-        err.message
-      );
-    }
-  }
-);
-
+}
 
 // =========================
-// BUTTONS
+// PHOTO MESSAGE
+// =========================
+
+async function handlePhotoMessage(
+    chatId,
+    msg,
+    session
+) {
+    try {
+        await bot.sendChatAction(
+            chatId,
+            "typing"
+        );
+
+        const photo =
+            msg.photo[
+                msg.photo.length - 1
+            ];
+
+        const file =
+            await bot.getFile(
+                photo.file_id
+            );
+
+        const imageUrl =
+            `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+
+        const userText =
+            msg.caption?.trim() ||
+            "Что изображено на этом фото? Опиши его понятно.";
+
+        const answer =
+            await askGroqWithImage(
+                session.history,
+                imageUrl,
+                userText
+            );
+
+        session.history.push({
+            role: "user",
+            content: userText
+        });
+
+        session.history.push({
+            role: "assistant",
+            content: answer
+        });
+
+        if (
+            session.history.length >
+            MAX_HISTORY_MESSAGES
+        ) {
+            session.history =
+                session.history.slice(
+                    -MAX_HISTORY_MESSAGES
+                );
+        }
+
+        await sendLongMessage(
+            chatId,
+            answer
+        );
+
+    } catch (error) {
+        console.error(
+            "Photo error:",
+            error
+        );
+
+        await bot.sendMessage(
+            chatId,
+            getFriendlyErrorText(error)
+        );
+    }
+}
+
+// =========================
+// START
+// =========================
+
+bot.onText(
+    /^\/start$/,
+    async (msg) => {
+        const chatId = msg.chat.id;
+
+        try {
+            await ensureUser(msg.from);
+
+            await bot.sendMessage(
+                chatId,
+                "👋 Привет! Я — deevik AI.\n\n" +
+                "💬 Могу общаться с тобой\n" +
+                "📷 Могу анализировать фотографии\n" +
+                "🎨 Скоро появится генератор фото\n" +
+                "💰 Для генерации будут использоваться кредиты\n\n" +
+                "Выбери действие ниже 👇",
+                getMainKeyboard()
+            );
+
+        } catch (error) {
+            console.error(
+                "/start error:",
+                error
+            );
+
+            await bot.sendMessage(
+                chatId,
+                "❌ Не удалось подключиться к базе данных."
+            );
+        }
+    }
+);
+
+// =========================
+// HELP
+// =========================
+
+bot.onText(
+    /^\/help$/,
+    async (msg) => {
+        await bot.sendMessage(
+            msg.chat.id,
+
+            "ℹ️ Помощь\n\n" +
+            "💬 Чат — общение с AI\n" +
+            "📷 Отправь фотографию — AI её проанализирует\n" +
+            "🎨 Генератор фото — платная генерация изображений\n" +
+            "👤 Профиль — твой баланс кредитов\n" +
+            "🤖 Новый чат — очистить историю разговора",
+
+            getMainKeyboard()
+        );
+    }
+);
+
+// =========================
+// PROFILE COMMAND
+// =========================
+
+bot.onText(
+    /^\/profile$/,
+    async (msg) => {
+        try {
+            await ensureUser(msg.from);
+
+            const credits =
+                await getCredits(
+                    msg.from.id
+                );
+
+            await bot.sendMessage(
+                msg.chat.id,
+
+                "👤 Профиль\n\n" +
+                `🆔 ID: ${msg.from.id}\n` +
+                `💰 Кредиты: ${credits}\n\n` +
+                `🎨 Генерация фото: ${PHOTO_GENERATION_COST} кредитов за изображение`,
+
+                getMainKeyboard()
+            );
+
+        } catch (error) {
+            console.error(
+                "Profile error:",
+                error
+            );
+
+            await bot.sendMessage(
+                msg.chat.id,
+                "❌ Не удалось загрузить профиль."
+            );
+        }
+    }
+);
+
+// =========================
+// NEW CHAT
+// =========================
+
+bot.onText(
+    /^\/new$/,
+    async (msg) => {
+        resetSession(msg.chat.id);
+
+        await bot.sendMessage(
+            msg.chat.id,
+            "🆕 Новый чат создан!",
+            getMainKeyboard()
+        );
+    }
+);
+
+// =========================
+// MAIN MESSAGE HANDLER
 // =========================
 
 bot.on(
-  'callback_query',
-  async (query) => {
-    const chatId =
-      query.message.chat.id;
+    "message",
+    async (msg) => {
+        if (!msg.chat) {
+            return;
+        }
 
-    const data =
-      query.data;
+        const chatId = msg.chat.id;
 
-    const session =
-      getSession(chatId);
+        try {
+            await ensureUser(msg.from);
 
-    try {
+            // Фото
+            if (
+                msg.photo &&
+                msg.photo.length > 0
+            ) {
+                const session =
+                    getSession(chatId);
 
-      if (
-        data === 'action_new'
-      ) {
-        session.history = [];
+                await handlePhotoMessage(
+                    chatId,
+                    msg,
+                    session
+                );
 
-        await bot.sendMessage(
-          chatId,
-          '🆕 Новый диалог начат!'
-        );
-      }
+                return;
+            }
 
+            // Только текст
+            if (!msg.text) {
+                return;
+            }
 
-      else if (
-        data === 'action_help'
-      ) {
-        await bot.sendMessage(
-          chatId,
-          HELP_TEXT
-        );
-      }
+            const text =
+                msg.text.trim();
 
+            // Кнопка Чат
+            if (text === "💬 Чат") {
+                await bot.sendMessage(
+                    chatId,
+                    "💬 Режим чата включён.\n\nНапиши сообщение, и я отвечу 🤖",
+                    getMainKeyboard()
+                );
 
-      else if (
-        data === 'action_profile'
-      ) {
-        await bot.sendMessage(
-          chatId,
-          getProfileText(
-            query.from,
-            session
-          )
-        );
-      }
+                return;
+            }
 
+            // Кнопка генератора
+            if (
+                text === "🎨 Генератор фото"
+            ) {
+                const credits =
+                    await getCredits(
+                        msg.from.id
+                    );
 
-      await bot.answerCallbackQuery(
-        query.id
-      );
+                await bot.sendMessage(
+                    chatId,
 
+                    "🎨 Генератор фото\n\n" +
+                    `💰 Твой баланс: ${credits} кредитов\n` +
+                    `🖼️ Одна генерация: ${PHOTO_GENERATION_COST} кредитов\n\n` +
+                    "Генератор пока находится в разработке 🚧\n" +
+                    "Скоро здесь появится создание изображений.",
+
+                    getMainKeyboard()
+                );
+
+                return;
+            }
+
+            // Профиль
+            if (text === "👤 Профиль") {
+                const credits =
+                    await getCredits(
+                        msg.from.id
+                    );
+
+                await bot.sendMessage(
+                    chatId,
+
+                    "👤 Профиль\n\n" +
+                    `🆔 ID: ${msg.from.id}\n` +
+                    `💰 Кредиты: ${credits}\n\n` +
+                    `🎨 Генерация фото: ${PHOTO_GENERATION_COST} кредитов`,
+
+                    getMainKeyboard()
+                );
+
+                return;
+            }
+
+            // Помощь
+            if (text === "ℹ️ Помощь") {
+                await bot.sendMessage(
+                    chatId,
+
+                    "ℹ️ Помощь\n\n" +
+                    "💬 Чат — общение с AI\n" +
+                    "📷 Фото — анализ изображения\n" +
+                    "🎨 Генератор фото — скоро\n" +
+                    "👤 Профиль — баланс кредитов\n\n" +
+                    "🤖 /new — новый чат",
+
+                    getMainKeyboard()
+                );
+
+                return;
+            }
+
+            // Новый чат
+            if (
+                text === "🤖 Новый чат"
+            ) {
+                resetSession(chatId);
+
+                await bot.sendMessage(
+                    chatId,
+                    "🆕 История очищена. Начинаем новый чат!",
+                    getMainKeyboard()
+                );
+
+                return;
+            }
+
+            // Обычный AI-запрос
+            const session =
+                getSession(chatId);
+
+            await handleAiMessage(
+                chatId,
+                text,
+                session
+            );
+
+        } catch (error) {
+            console.error(
+                "Message handler error:",
+                error
+            );
+
+            try {
+                await bot.sendMessage(
+                    chatId,
+                    "❌ Произошла ошибка. Попробуй ещё раз."
+                );
+            } catch {}
+        }
     }
-
-    catch (err) {
-      console.error(
-        '❌ Callback error:',
-        err.message
-      );
-
-      try {
-        await bot.answerCallbackQuery(
-          query.id
-        );
-      }
-
-      catch (_) {}
-    }
-  }
 );
 
-
 // =========================
-// TELEGRAM POLLING ERRORS
+// TELEGRAM ERRORS
 // =========================
 
 bot.on(
-  'polling_error',
-  (err) => {
-    console.error(
-      '❌ Polling error:',
-      err.message
-    );
-  }
+    "polling_error",
+    (error) => {
+        console.error(
+            "Polling error:",
+            error.message
+        );
+    }
 );
 
-
-// =========================
-// NODE ERRORS
-// =========================
-
-process.on(
-  'unhandledRejection',
-  (reason) => {
-    console.error(
-      '❌ Unhandled rejection:',
-      reason
-    );
-  }
+bot.on(
+    "error",
+    (error) => {
+        console.error(
+            "Bot error:",
+            error.message
+        );
+    }
 );
-
-process.on(
-  'uncaughtException',
-  (err) => {
-    console.error(
-      '❌ Uncaught exception:',
-      err
-    );
-  }
-);
-
 
 // =========================
 // RENDER HTTP SERVER
 // =========================
 
 const PORT =
-  process.env.PORT || 3000;
+    process.env.PORT || 3000;
 
 const server =
-  http.createServer(
-    (req, res) => {
-      res.writeHead(
-        200,
-        {
-          'Content-Type':
-            'text/plain; charset=utf-8'
+    http.createServer(
+        (req, res) => {
+            res.writeHead(
+                200,
+                {
+                    "Content-Type":
+                        "text/plain; charset=utf-8"
+                }
+            );
+
+            res.end(
+                "deevik bot is running 🚀"
+            );
         }
-      );
+    );
 
-      res.end(
-        'Bot is running'
-      );
+// =========================
+// START
+// =========================
+
+async function start() {
+    try {
+        await initDatabase();
+
+        server.listen(
+            PORT,
+            "0.0.0.0",
+            () => {
+                console.log(
+                    `🌐 HTTP server running on port ${PORT}`
+                );
+            }
+        );
+
+        const me =
+            await bot.getMe();
+
+        console.log(
+            `🤖 Bot started: @${me.username}`
+        );
+
+    } catch (error) {
+        console.error(
+            "❌ Startup error:",
+            error
+        );
+
+        process.exit(1);
     }
-  );
+}
 
-server.on(
-  'error',
-  (err) => {
-    console.error(
-      '❌ HTTP server error:',
-      err.message
-    );
-
-    process.exit(1);
-  }
-);
-
-server.listen(
-  PORT,
-  () => {
-    console.log(
-      `🌐 HTTP server listening on port ${PORT}`
-    );
-  }
-);
-
-
-// =========================
-// START CHECK
-// =========================
-
-bot.getMe()
-  .then((me) => {
-    console.log(
-      `✅ Bot is running (@${me.username})`
-    );
-  })
-
-  .catch((err) => {
-    console.error(
-      '❌ Не удалось подключиться к Telegram:',
-      err.message
-    );
-
-    process.exit(1);
-  });
+start();
