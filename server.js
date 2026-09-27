@@ -1,5 +1,6 @@
 // server.js
 // Telegram-бот на node-telegram-bot-api + AI-чат через OpenRouter.
+// Оптимизирован для максимально быстрой генерации ответов.
 // Работает как обычный Render Free Web Service:
 //   - Telegram polling (не webhook)
 //   - встроенный HTTP-сервер (модуль http, без Express) слушает process.env.PORT
@@ -34,13 +35,28 @@ console.log('🤖 Bot starting...');
 // ==== Создание бота (режим polling — бот сам опрашивает Telegram) ====
 const bot = new TelegramBot(token, { polling: true });
 
-// ==== Настройки AI-чата ====
+// ==== Настройки AI-чата (оптимизировано под скорость) ====
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const OPENROUTER_MODEL = 'openrouter/free';
+
+// Конкретная быстрая модель вместо роутера "openrouter/free" — роутер сам
+// выбирает модель на своё усмотрение и иногда попадает на медленную.
+// gpt-oss-20b — компактная MoE-модель (3.6B активных параметров),
+// специально оптимизированная под низкую задержку ответа.
+const OPENROUTER_MODEL = 'openai/gpt-oss-20b:free';
+
+// Ограничиваем длину ответа — большие ответы генерируются заметно дольше.
+const MAX_OUTPUT_TOKENS = 600;
+
+const TEMPERATURE = 0.7;
+
+// Таймаут одного запроса к OpenRouter. Если модель "зависла" — не ждём
+// бесконечно, а корректно сообщаем об этом пользователю.
+const REQUEST_TIMEOUT_MS = 20000;
 
 // Сколько последних сообщений (и от пользователя, и от AI суммарно) хранить
-// в истории одного диалога — чтобы не расходовать слишком много токенов.
-const MAX_HISTORY_MESSAGES = 10;
+// в истории одного диалога. Короче история — быстрее и дешевле ответ,
+// но пользователь ещё должен ощущать связный контекст.
+const MAX_HISTORY_MESSAGES = 6;
 
 // Максимальная длина одного сообщения в Telegram — 4096 символов,
 // берём с запасом, чтобы не наткнуться на лимит.
@@ -130,6 +146,9 @@ function splitMessage(text, maxLen = TELEGRAM_MESSAGE_LIMIT) {
 }
 
 async function askOpenRouter(history) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
   let response;
 
   try {
@@ -141,14 +160,27 @@ async function askOpenRouter(history) {
       },
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
-        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history]
-      })
+        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history],
+        max_tokens: MAX_OUTPUT_TOKENS,
+        temperature: TEMPERATURE,
+        // Снижаем уровень "рассуждений" модели — для простых вопросов вроде
+        // "привет" или "2+2" глубокое рассуждение не нужно и только замедляет ответ.
+        reasoning: { effort: 'low' }
+      }),
+      signal: controller.signal
     });
   } catch (networkErr) {
+    if (networkErr.name === 'AbortError') {
+      const err = new Error(`OpenRouter не ответил за ${REQUEST_TIMEOUT_MS / 1000} секунд (timeout).`);
+      err.kind = 'timeout';
+      throw err;
+    }
     // Например, нет сети или OpenRouter недоступен
     const err = new Error(`OpenRouter недоступен: ${networkErr.message}`);
     err.kind = 'network';
     throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (!response.ok) {
@@ -187,6 +219,9 @@ function getFriendlyErrorText(err) {
   }
   if (err.status && err.status >= 500) {
     return '⚠️ AI-сервис сейчас недоступен. Попробуй немного позже.';
+  }
+  if (err.kind === 'timeout') {
+    return '⚠️ AI слишком долго не отвечал, запрос прерван. Попробуй ещё раз.';
   }
   if (err.kind === 'network') {
     return '⚠️ Не получилось связаться с AI-сервисом. Проверь, что всё в порядке, и попробуй ещё раз.';
