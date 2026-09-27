@@ -10,7 +10,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "node-telegram-bot-api": "0.68.0"
+    "node-telegram-bot-api": "0.67.0"
   },
   "license": "MIT"
 }
