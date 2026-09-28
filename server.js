@@ -158,7 +158,7 @@ const bot = new TelegramBot(token, {
 
 const GROQ_MODEL = "qwen/qwen3.8-27b";
 
-const MAX_OUTPUT_TOKENS = 600;
+const MAX_OUTPUT_TOKENS = 1000;
 const TEMPERATURE = 0.7;
 const REQUEST_TIMEOUT_MS = 20000;
 const MAX_HISTORY_MESSAGES = 6;
